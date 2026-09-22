@@ -4,7 +4,9 @@ use super::dp_utils;
 use super::logprobs_merge;
 use super::pd_router::PdRouterBase;
 use super::pd_types::{error_chain, PDRouterError};
-use super::vllm_service_discovery::{MoriIOTransferMode, ServiceRegistry, ServiceType};
+use super::vllm_service_discovery::{
+    MoriIOServiceRegistration, MoriIOTransferMode, ServiceRegistry, ServiceType,
+};
 use crate::config::KvConnector;
 use crate::core::{BasicWorker, Worker, WorkerType};
 use crate::metrics::RouterMetrics;
@@ -105,6 +107,52 @@ fn build_prefill_request_builder(
 }
 
 impl VllmPDRouter {
+    async fn load_static_moriio_worker(
+        client: &reqwest::Client,
+        registry: &ServiceRegistry,
+        worker_url: &str,
+        service_type: ServiceType,
+        api_key: Option<&str>,
+    ) -> Result<(), String> {
+        let parsed =
+            url::Url::parse(worker_url).map_err(|e| format!("Invalid MoRI-IO worker URL: {e}"))?;
+        if parsed.scheme() != "http"
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(
+                "Static MoRI-IO PoC requires HTTP worker origins (http://host:port)".into(),
+            );
+        }
+        let endpoint = format!("{}/v1/moriio/metadata", worker_url.trim_end_matches('/'));
+        let mut request = client
+            .get(&endpoint)
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(key) = api_key {
+            request = request.bearer_auth(key);
+        }
+        let metadata: MoriIOServiceRegistration = request
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| format!("Cannot fetch MoRI-IO metadata from {endpoint}: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("Invalid MoRI-IO metadata from {endpoint}: {e}"))?;
+        // Use the configured URL, not the worker's advertised HTTP address.
+        registry.register_static_moriio(
+            worker_url
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string(),
+            metadata,
+            service_type,
+        )
+    }
+
     /// Query the Mooncake bootstrap server on a prefill node to get engine_id per dp_rank.
     /// Retries with backoff since the prefill server may not be ready at router startup.
     async fn query_mooncake_bootstrap(
@@ -1165,6 +1213,41 @@ impl VllmPDRouter {
         path: &str,
         headers: Option<&HeaderMap>,
     ) -> Result<Response, PDRouterError> {
+        if matches!(self.kv_connector, KvConnector::MoriIO) {
+            let prefill_http = prefill_worker
+                .base_url()
+                .trim_start_matches("http://")
+                .trim_end_matches('/');
+            let decode_http = decode_worker
+                .base_url()
+                .trim_start_matches("http://")
+                .trim_end_matches('/');
+            let prefill_zmq = self
+                .service_registry
+                .get_zmq_address(prefill_http, ServiceType::Prefill);
+            let decode_zmq = self
+                .service_registry
+                .get_zmq_address(decode_http, ServiceType::Decode);
+            let (Some(prefill_zmq), Some(decode_zmq)) = (prefill_zmq, decode_zmq) else {
+                return Err(PDRouterError::InvalidConfiguration {
+                    reason: "MoRI-IO metadata is missing; restart the router after changing static workers".into(),
+                });
+            };
+            prefill_worker.increment_load();
+            decode_worker.increment_load();
+            let result = self
+                .process_vllm_two_stage_request_discovered(
+                    original_request,
+                    &(prefill_http.to_string(), prefill_zmq),
+                    &(decode_http.to_string(), decode_zmq),
+                    path,
+                    headers,
+                )
+                .await;
+            prefill_worker.decrement_load();
+            decode_worker.decrement_load();
+            return result.map_err(|message| PDRouterError::NetworkError { message });
+        }
         debug!("ENTERED process_vllm_two_stage_request method");
         let start_time = Instant::now();
         debug!(
@@ -1581,7 +1664,22 @@ impl VllmPDRouter {
         ctx: &Arc<crate::server::AppContext>,
     ) -> Result<Self, String> {
         let kv_connector = ctx.router_config.kv_connector;
-        let http_client = reqwest::Client::new();
+        let mut client_builder = reqwest::Client::builder();
+        if matches!(kv_connector, KvConnector::MoriIO) && discovery_address.is_none() {
+            if ctx.router_config.intra_node_data_parallel_size != 1 {
+                return Err("Static MoRI-IO PoC requires intra-node data parallel size 1".into());
+            }
+            if let Some(key) = &ctx.router_config.api_key {
+                let mut headers = HeaderMap::new();
+                let mut value = format!("Bearer {key}")
+                    .parse::<axum::http::HeaderValue>()
+                    .map_err(|_| "Invalid backend API key")?;
+                value.set_sensitive(true);
+                headers.insert(axum::http::header::AUTHORIZATION, value);
+                client_builder = client_builder.default_headers(headers);
+            }
+        }
+        let http_client = client_builder.build().map_err(|e| e.to_string())?;
 
         if let Some(ref addr) = discovery_address {
             // Discovery mode
@@ -1639,6 +1737,23 @@ impl VllmPDRouter {
 
             let prefill_workers = pd_router.worker_registry.get_prefill_workers();
             let decode_workers = pd_router.worker_registry.get_decode_workers();
+            if matches!(kv_connector, KvConnector::MoriIO) {
+                for (workers, service_type) in [
+                    (&prefill_workers, ServiceType::Prefill),
+                    (&decode_workers, ServiceType::Decode),
+                ] {
+                    for worker in workers {
+                        Self::load_static_moriio_worker(
+                            &http_client,
+                            &service_registry,
+                            worker.base_url(),
+                            service_type.clone(),
+                            ctx.router_config.api_key.as_deref(),
+                        )
+                        .await?;
+                    }
+                }
+            }
             let prefill_policy = ctx.policy_registry.get_prefill_policy();
             let decode_policy = ctx.policy_registry.get_decode_policy();
 
