@@ -1177,10 +1177,18 @@ impl VllmPDRouter {
         // Increment prefill load at the start of the prefill phase
         prefill_worker.increment_load();
 
-        let prefill_zmq_addr =
-            self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
-        let decode_zmq_addr = self.get_zmq_address(decode_worker.base_url(), ServiceType::Decode);
-        let request_id = Self::generate_vllm_request_id(&prefill_zmq_addr, &decode_zmq_addr);
+        // MoRI-IO parses peer addresses out of an embedded request ID. Without discovery
+        // this ID would embed HTTP addresses, so send a plain one; the connector then
+        // uses the addresses prefill returns in kv_transfer_params, as NIXL does.
+        let request_id = if matches!(self.kv_connector, KvConnector::MoriIO) {
+            Uuid::new_v4().simple().to_string()
+        } else {
+            let prefill_zmq_addr =
+                self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
+            let decode_zmq_addr =
+                self.get_zmq_address(decode_worker.base_url(), ServiceType::Decode);
+            Self::generate_vllm_request_id(&prefill_zmq_addr, &decode_zmq_addr)
+        };
 
         debug!("Generated vLLM request ID: {}", request_id);
         debug!("🔍 vLLM Proxy Comparison:");
@@ -1379,12 +1387,9 @@ impl VllmPDRouter {
                 );
             }
         } else {
-            // Sequential dispatch (NIXL, MoRI-IO READ): extract kv_transfer_params from prefill response
-            if let Some(mut params) = kv_transfer_params {
-                if matches!(self.kv_connector, KvConnector::MoriIO) {
-                    // MoRI-IO decode connector needs to know how many prefill DP ranks to handshake with.
-                    params["remote_dp_size"] = json!(self.intra_node_data_parallel_size);
-                }
+            // Sequential dispatch (NIXL, MoRI-IO READ): forward prefill's kv_transfer_params.
+            // A MoRI-IO producer reports its own DP rank and size in them.
+            if let Some(params) = kv_transfer_params {
                 decode_request["kv_transfer_params"] = params;
                 debug!(
                     "Added kv_transfer_params to decode request for {:?} connector",
@@ -1634,6 +1639,15 @@ impl VllmPDRouter {
 
             // No service discovery in direct URL mode
             let service_registry = ServiceRegistry::new();
+            if matches!(kv_connector, KvConnector::MoriIO) {
+                info!(
+                    "MoRI-IO with worker URLs uses READ mode; set \"read_mode\": true in the \
+                     workers' kv_connector_extra_config. WRITE requires --vllm-discovery-address."
+                );
+                let _ = service_registry
+                    .moriio_transfer_mode
+                    .set(MoriIOTransferMode::Read);
+            }
 
             info!("VllmPDRouter created successfully with direct URLs");
 
