@@ -453,14 +453,19 @@ impl ConfigValidator {
         // DP-aware routing is now automatically enabled when data_parallel_size > 1
         // and is compatible with service discovery
 
-        // MoRI-IO requires service discovery: ZMQ addresses are obtained via instance
-        // registration and are not available in direct URL mode.
-        if config.kv_connector == KvConnector::MoriIO && !has_vllm_discovery {
+        if config.kv_connector == KvConnector::MoriIO
+            && !matches!(config.mode, RoutingMode::VllmPrefillDecode { .. })
+        {
             return Err(ConfigError::IncompatibleConfig {
-                reason: "MoRI-IO KV connector requires service discovery to be enabled \
-                         (ZMQ addresses are obtained via instance registration). Please \
-                        run with `--vllm-discovery-address ${address}`"
-                    .to_string(),
+                reason: "MoRI-IO KV connector requires vLLM PD routing".to_string(),
+            });
+        }
+        if config.kv_connector == KvConnector::MoriIO
+            && !has_vllm_discovery
+            && config.intra_node_data_parallel_size != 1
+        {
+            return Err(ConfigError::IncompatibleConfig {
+                reason: "Static MoRI-IO PoC requires intra-node data parallel size 1".into(),
             });
         }
 
@@ -750,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_moriio_requires_service_discovery() {
+    fn test_moriio_requires_pd_routing() {
         let mut config = RouterConfig::new(
             RoutingMode::Regular {
                 worker_urls: vec!["http://worker:8000".to_string()],
@@ -765,7 +770,7 @@ mod tests {
         if let Err(e) = result {
             assert!(e
                 .to_string()
-                .contains("MoRI-IO KV connector requires service discovery"));
+                .contains("MoRI-IO KV connector requires vLLM PD routing"));
         }
     }
 

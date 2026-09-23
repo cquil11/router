@@ -156,6 +156,46 @@ impl Default for ServiceRegistry {
 }
 
 impl ServiceRegistry {
+    /// Cache metadata for a statically configured worker without starting discovery.
+    pub fn register_static_moriio(
+        &self,
+        http_address: String,
+        registration: MoriIOServiceRegistration,
+        service_type: ServiceType,
+    ) -> Result<(), String> {
+        if registration.base.service_type != service_type.to_string() {
+            return Err(format!(
+                "MoRI-IO worker {http_address} has the wrong P/D role"
+            ));
+        }
+        if registration.dp_size != 1 || registration.tp_size == 0 {
+            return Err("Static MoRI-IO PoC requires dp_size=1 and positive tp_size".into());
+        }
+        let mode = registration.parsed_transfer_mode().ok_or_else(|| {
+            format!(
+                "Unknown MoRI-IO transfer mode: {}",
+                registration.transfer_mode
+            )
+        })?;
+        if *self.moriio_transfer_mode.get_or_init(|| mode) != mode {
+            return Err("All MoRI-IO workers must use the same READ/WRITE transfer mode".into());
+        }
+        let instances = match service_type {
+            ServiceType::Prefill => &self.prefill_instances,
+            ServiceType::Decode => &self.decode_instances,
+        };
+        instances.lock().unwrap().insert(
+            http_address,
+            ServiceInstance {
+                zmq_address: registration.base.zmq_address,
+                expires_at: u64::MAX,
+                tp_size: registration.tp_size,
+                dp_size: registration.dp_size,
+            },
+        );
+        Ok(())
+    }
+
     /// Create a new service registry
     pub fn new() -> Self {
         Self {
