@@ -24,7 +24,7 @@ fn prefill_kv_transfer_params() -> Value {
         "remote_notify_port": 61005,
         "remote_dp_rank": 1,
         "remote_dp_rank_override": true,
-        // Differs from the router's intra-node DP size (1): prefill's value must win.
+        // Differs from the router's intra-node DP size (1); forwarded unchanged.
         "remote_dp_size": 2,
         "remote_dp_size_local": 2,
         "tp_size": 4,

@@ -1387,15 +1387,9 @@ impl VllmPDRouter {
                 );
             }
         } else {
-            // Sequential dispatch (NIXL, MoRI-IO READ): extract kv_transfer_params from prefill response
-            if let Some(mut params) = kv_transfer_params {
-                // MoRI-IO decode connector needs to know how many prefill DP ranks to
-                // handshake with. Prefill reports its real DP size; keep it when present.
-                if matches!(self.kv_connector, KvConnector::MoriIO)
-                    && params.get("remote_dp_size").is_none()
-                {
-                    params["remote_dp_size"] = json!(self.intra_node_data_parallel_size);
-                }
+            // Sequential dispatch (NIXL, MoRI-IO READ): forward prefill's kv_transfer_params.
+            // A MoRI-IO producer reports its own DP rank and size in them.
+            if let Some(params) = kv_transfer_params {
                 decode_request["kv_transfer_params"] = params;
                 debug!(
                     "Added kv_transfer_params to decode request for {:?} connector",
@@ -1645,9 +1639,6 @@ impl VllmPDRouter {
 
             // No service discovery in direct URL mode
             let service_registry = ServiceRegistry::new();
-            // Static MoRI-IO runs in READ mode: decode learns prefill's MoRI-IO addresses
-            // from the prefill response. WRITE needs them before prefill runs, so it
-            // still requires discovery.
             if matches!(kv_connector, KvConnector::MoriIO) {
                 info!(
                     "MoRI-IO with worker URLs uses READ mode; set \"read_mode\": true in the \
