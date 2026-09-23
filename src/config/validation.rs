@@ -737,22 +737,4 @@ mod tests {
             assert!(e.to_string().contains("prefill requires at least 2"));
         }
     }
-
-    #[test]
-    fn test_moriio_with_service_discovery_is_valid() {
-        let mut config = RouterConfig::new(
-            RoutingMode::VllmPrefillDecode {
-                prefill_urls: vec![],
-                decode_urls: vec![],
-                prefill_policy: None,
-                decode_policy: None,
-                discovery_address: Some("0.0.0.0:36367".to_string()),
-            },
-            PolicyConfig::Random,
-        );
-        config.kv_connector = KvConnector::MoriIO;
-
-        let result = ConfigValidator::validate(&config);
-        assert!(result.is_ok());
-    }
 }

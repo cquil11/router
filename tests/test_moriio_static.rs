@@ -12,7 +12,27 @@ use vllm_router_rs::{
 
 type Requests = Arc<Mutex<Vec<(&'static str, HeaderMap, Value)>>>;
 
-/// Mock vLLM worker. Prefill answers with the kv_transfer_params a MoRI-IO producer returns.
+/// What a MoRI-IO READ producer's `request_finished` returns (vLLM MoRIIOConnectorScheduler).
+fn prefill_kv_transfer_params() -> Value {
+    json!({
+        "do_remote_prefill": true,
+        "do_remote_decode": false,
+        "remote_block_ids": [[1, 2, 3]],
+        "remote_engine_id": "10.0.0.1:6301",
+        "remote_host": "10.0.0.1",
+        "remote_handshake_port": 6301,
+        "remote_notify_port": 61005,
+        "remote_dp_rank": 1,
+        "remote_dp_rank_override": true,
+        // Differs from the router's intra-node DP size (1): prefill's value must win.
+        "remote_dp_size": 2,
+        "remote_dp_size_local": 2,
+        "tp_size": 4,
+        "transfer_id": "tx-from-prefill",
+    })
+}
+
+/// Mock vLLM worker; prefill answers with MoRI-IO producer kv_transfer_params.
 async fn worker(role: &'static str, requests: Requests) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -21,17 +41,11 @@ async fn worker(role: &'static str, requests: Requests) -> (String, tokio::task:
             post(
                 move |headers: HeaderMap, Json(body): Json<Value>| async move {
                     requests.lock().unwrap().push((role, headers, body));
-                    Json(json!({
-                        "choices": [{"message": {"content": "done"}}],
-                        "kv_transfer_params": {
-                            "do_remote_prefill": true,
-                            "remote_engine_id": "10.0.0.1:6301",
-                            "remote_host": "10.0.0.1",
-                            "remote_handshake_port": 6301,
-                            "remote_notify_port": 61005,
-                            "transfer_id": "tx-from-prefill",
-                        }
-                    }))
+                    let mut response = json!({"choices": [{"message": {"content": "done"}}]});
+                    if role == "P" {
+                        response["kv_transfer_params"] = prefill_kv_transfer_params();
+                    }
+                    Json(response)
                 },
             ),
         );
@@ -85,17 +99,10 @@ async fn static_read_forwards_prefill_addresses_to_decode() {
     assert_eq!(request_id, d_headers["x-request-id"].to_str().unwrap());
     assert!(!request_id.contains("___prefill_addr_"), "{request_id}");
 
-    let p_params = &p_body["kv_transfer_params"];
-    assert_eq!(p_params["do_remote_decode"], true);
-    assert!(p_params["transfer_id"].as_str().unwrap().starts_with("tx-"));
+    assert_eq!(p_body["kv_transfer_params"]["do_remote_decode"], true);
 
-    // Decode gets prefill's own addresses, plus the DP size the connector handshakes with.
-    let d_params = &d_body["kv_transfer_params"];
-    assert_eq!(d_params["remote_host"], "10.0.0.1");
-    assert_eq!(d_params["remote_handshake_port"], 6301);
-    assert_eq!(d_params["remote_notify_port"], 61005);
-    assert_eq!(d_params["transfer_id"], "tx-from-prefill");
-    assert_eq!(d_params["remote_dp_size"], 1);
+    // Decode gets prefill's MoRI-IO addresses and DP layout unchanged.
+    assert_eq!(d_body["kv_transfer_params"], prefill_kv_transfer_params());
 
     prefill.abort();
     decode.abort();

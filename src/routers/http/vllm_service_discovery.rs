@@ -38,7 +38,7 @@ pub struct ServiceRegistration {
     pub zmq_address: String,
 }
 
-/// MoRI-IO transfer mode, determined from the first instance registration.
+/// MoRI-IO transfer mode, from the first instance registration, or READ with worker URLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoriIOTransferMode {
     Read,
@@ -86,7 +86,8 @@ pub struct ServiceRegistry {
     prefill_instances: Arc<Mutex<HashMap<String, ServiceInstance>>>,
     decode_instances: Arc<Mutex<HashMap<String, ServiceInstance>>>,
     shutdown_tx: Option<broadcast::Sender<()>>,
-    /// Set on first MoRI-IO registration; subsequent mismatches are rejected.
+    /// Set on first MoRI-IO registration (subsequent mismatches are rejected), or to READ
+    /// in direct URL mode.
     pub moriio_transfer_mode: Arc<OnceLock<MoriIOTransferMode>>,
 }
 

@@ -1177,15 +1177,16 @@ impl VllmPDRouter {
         // Increment prefill load at the start of the prefill phase
         prefill_worker.increment_load();
 
-        let prefill_zmq_addr =
-            self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
-        let decode_zmq_addr = self.get_zmq_address(decode_worker.base_url(), ServiceType::Decode);
         // MoRI-IO parses peer addresses out of an embedded request ID. Without discovery
         // this ID would embed HTTP addresses, so send a plain one; the connector then
         // uses the addresses prefill returns in kv_transfer_params, as NIXL does.
         let request_id = if matches!(self.kv_connector, KvConnector::MoriIO) {
             Uuid::new_v4().simple().to_string()
         } else {
+            let prefill_zmq_addr =
+                self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
+            let decode_zmq_addr =
+                self.get_zmq_address(decode_worker.base_url(), ServiceType::Decode);
             Self::generate_vllm_request_id(&prefill_zmq_addr, &decode_zmq_addr)
         };
 
@@ -1388,8 +1389,11 @@ impl VllmPDRouter {
         } else {
             // Sequential dispatch (NIXL, MoRI-IO READ): extract kv_transfer_params from prefill response
             if let Some(mut params) = kv_transfer_params {
-                if matches!(self.kv_connector, KvConnector::MoriIO) {
-                    // MoRI-IO decode connector needs to know how many prefill DP ranks to handshake with.
+                // MoRI-IO decode connector needs to know how many prefill DP ranks to
+                // handshake with. Prefill reports its real DP size; keep it when present.
+                if matches!(self.kv_connector, KvConnector::MoriIO)
+                    && params.get("remote_dp_size").is_none()
+                {
                     params["remote_dp_size"] = json!(self.intra_node_data_parallel_size);
                 }
                 decode_request["kv_transfer_params"] = params;
@@ -1645,6 +1649,10 @@ impl VllmPDRouter {
             // from the prefill response. WRITE needs them before prefill runs, so it
             // still requires discovery.
             if matches!(kv_connector, KvConnector::MoriIO) {
+                info!(
+                    "MoRI-IO with worker URLs uses READ mode; set \"read_mode\": true in the \
+                     workers' kv_connector_extra_config. WRITE requires --vllm-discovery-address."
+                );
                 let _ = service_registry
                     .moriio_transfer_mode
                     .set(MoriIOTransferMode::Read);
