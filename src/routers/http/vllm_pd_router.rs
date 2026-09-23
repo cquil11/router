@@ -1180,7 +1180,14 @@ impl VllmPDRouter {
         let prefill_zmq_addr =
             self.get_zmq_address(prefill_worker.base_url(), ServiceType::Prefill);
         let decode_zmq_addr = self.get_zmq_address(decode_worker.base_url(), ServiceType::Decode);
-        let request_id = Self::generate_vllm_request_id(&prefill_zmq_addr, &decode_zmq_addr);
+        // MoRI-IO parses peer addresses out of an embedded request ID. Without discovery
+        // this ID would embed HTTP addresses, so send a plain one; the connector then
+        // uses the addresses prefill returns in kv_transfer_params, as NIXL does.
+        let request_id = if matches!(self.kv_connector, KvConnector::MoriIO) {
+            Uuid::new_v4().simple().to_string()
+        } else {
+            Self::generate_vllm_request_id(&prefill_zmq_addr, &decode_zmq_addr)
+        };
 
         debug!("Generated vLLM request ID: {}", request_id);
         debug!("🔍 vLLM Proxy Comparison:");
@@ -1634,6 +1641,14 @@ impl VllmPDRouter {
 
             // No service discovery in direct URL mode
             let service_registry = ServiceRegistry::new();
+            // Static MoRI-IO runs in READ mode: decode learns prefill's MoRI-IO addresses
+            // from the prefill response. WRITE needs them before prefill runs, so it
+            // still requires discovery.
+            if matches!(kv_connector, KvConnector::MoriIO) {
+                let _ = service_registry
+                    .moriio_transfer_mode
+                    .set(MoriIOTransferMode::Read);
+            }
 
             info!("VllmPDRouter created successfully with direct URLs");
 

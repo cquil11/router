@@ -147,6 +147,19 @@ cargo run --release -- \
     --host 127.0.0.1 \
     --port 8090 \
     --intra-node-data-parallel-size 1
+
+# When vLLM runs the MoRI-IO connector in READ mode (`"read_mode": true`), pass
+# --kv-connector moriio with worker URLs. As with NIXL, prefill returns its MoRI-IO
+# addresses in kv_transfer_params and the router forwards them to decode.
+# WRITE mode needs decode's addresses before prefill runs, so it requires
+# --vllm-discovery-address instead of worker URLs.
+cargo run --release -- \
+    --vllm-pd-disaggregation \
+    --kv-connector moriio \
+    --prefill http://127.0.0.1:8081 \
+    --decode http://127.0.0.1:8083 \
+    --host 127.0.0.1 \
+    --port 8090
 ```
 
 ## Configuration
