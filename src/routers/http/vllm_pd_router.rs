@@ -112,7 +112,6 @@ impl VllmPDRouter {
         registry: &ServiceRegistry,
         worker_url: &str,
         service_type: ServiceType,
-        api_key: Option<&str>,
     ) -> Result<(), String> {
         let parsed =
             url::Url::parse(worker_url).map_err(|e| format!("Invalid MoRI-IO worker URL: {e}"))?;
@@ -128,13 +127,10 @@ impl VllmPDRouter {
             );
         }
         let endpoint = format!("{}/v1/moriio/metadata", worker_url.trim_end_matches('/'));
-        let mut request = client
+        // The client carries the backend API key as a default header.
+        let metadata: MoriIOServiceRegistration = client
             .get(&endpoint)
-            .timeout(std::time::Duration::from_secs(10));
-        if let Some(key) = api_key {
-            request = request.bearer_auth(key);
-        }
-        let metadata: MoriIOServiceRegistration = request
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -1665,10 +1661,8 @@ impl VllmPDRouter {
     ) -> Result<Self, String> {
         let kv_connector = ctx.router_config.kv_connector;
         let mut client_builder = reqwest::Client::builder();
+        // Config validation already restricts static MoRI-IO to intra-node DP=1.
         if matches!(kv_connector, KvConnector::MoriIO) && discovery_address.is_none() {
-            if ctx.router_config.intra_node_data_parallel_size != 1 {
-                return Err("Static MoRI-IO PoC requires intra-node data parallel size 1".into());
-            }
             if let Some(key) = &ctx.router_config.api_key {
                 let mut headers = HeaderMap::new();
                 let mut value = format!("Bearer {key}")
@@ -1748,7 +1742,6 @@ impl VllmPDRouter {
                             &service_registry,
                             worker.base_url(),
                             service_type.clone(),
-                            ctx.router_config.api_key.as_deref(),
                         )
                         .await?;
                     }
